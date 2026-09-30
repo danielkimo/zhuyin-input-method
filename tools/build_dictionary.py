@@ -1,0 +1,144 @@
+#!/usr/bin/env python3
+"""Builds data/dictionary.tsv from the vendored third_party/mcbopomofo-data
+raw corpus files.
+
+Inputs (see third_party/mcbopomofo-data/README or the repository root README
+for provenance/licensing -- these files are vendored from the MIT-licensed
+openvanilla/McBopomofo project, whose multi-character phrase table
+(BPMFMappings.txt) was itself originally derived from the BSD-licensed
+libtabe project):
+
+  BPMFBase.txt      "<char> <bopomofo> ..."      single-character readings
+  BPMFMappings.txt  "<phrase> <syl1> <syl2> ..."  multi-character phrase readings
+  phrase.occ        "<phrase-or-char> <count>"    corpus frequency counts
+
+Output: data/dictionary.tsv, UTF-8, lines of:
+  <word>\t<space-separated bopomofo syllables>\t<integer weight>
+
+The weight is the raw corpus occurrence count (falling back to 1 for
+entries with no measured frequency). The engine converts this to a
+log-probability at load time; keeping raw counts here makes the file
+re-usable and easy to inspect/audit.
+"""
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DATA_DIR = ROOT / "third_party" / "mcbopomofo-data"
+OUT_PATH = ROOT / "data" / "dictionary.tsv"
+
+# Only keep syllables that look like real Bopomofo (initial/medial/final
+# symbols optionally followed by a single tone mark). This filters out a
+# handful of stray romanization-only lines in the source data.
+BPMF_SYLLABLE_RE = re.compile(
+    r"^[\u3105-\u3129]+[\u02CA\u02C7\u02CB\u02D9]?$"
+)
+
+
+def load_counts():
+    counts = {}
+    with open(DATA_DIR / "phrase.occ", encoding="utf-8") as f:
+        for line in f:
+            line = line.rstrip("\n")
+            if not line:
+                continue
+            parts = line.split(" ")
+            if len(parts) != 2:
+                continue
+            word, count_str = parts
+            try:
+                counts[word] = int(count_str)
+            except ValueError:
+                continue
+    return counts
+
+
+def load_single_char_readings():
+    """Returns dict: char -> list of bopomofo readings (first = most common
+    per file order, used only as a fallback; BPMFMappings.txt is preferred
+    for anything multi-character)."""
+    readings = {}
+    with open(DATA_DIR / "BPMFBase.txt", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split(" ")
+            if len(parts) < 2:
+                continue
+            char, bpmf = parts[0], parts[1]
+            if not BPMF_SYLLABLE_RE.match(bpmf):
+                continue
+            readings.setdefault(char, [])
+            if bpmf not in readings[char]:
+                readings[char].append(bpmf)
+    return readings
+
+
+def iter_phrase_mappings():
+    """Yields (phrase, [syllables...]) for every line of BPMFMappings.txt
+    that parses as pure Bopomofo syllables."""
+    with open(DATA_DIR / "BPMFMappings.txt", encoding="utf-8") as f:
+        for line in f:
+            parts = line.rstrip("\n").split(" ")
+            if len(parts) < 2:
+                continue
+            phrase = parts[0]
+            syllables = parts[1:]
+            if len(syllables) != len(phrase):
+                continue
+            if not all(BPMF_SYLLABLE_RE.match(s) for s in syllables):
+                continue
+            yield phrase, syllables
+
+
+def main():
+    counts = load_counts()
+    single_readings = load_single_char_readings()
+
+    # entries: (word, reading_key) -> weight ; reading_key = " ".join(syllables)
+    entries = {}
+
+    def add(word, syllables, weight):
+        key = (word, " ".join(syllables))
+        # Keep the max weight if we see duplicate (word, reading) pairs from
+        # different source lines.
+        if key not in entries or entries[key] < weight:
+            entries[key] = weight
+
+    # 1) Single characters, using their measured occurrence count and every
+    #    known reading from BPMFBase.txt so heteronyms remain selectable.
+    for char, syls in single_readings.items():
+        weight = counts.get(char, 1)
+        for bpmf in syls:
+            add(char, [bpmf], weight)
+
+    # 2) Multi-character phrases with explicit readings.
+    min_phrase_count = 2  # drop pure noise/typos while keeping long tail
+    kept, dropped = 0, 0
+    for phrase, syllables in iter_phrase_mappings():
+        weight = counts.get(phrase)
+        if weight is None:
+            dropped += 1
+            continue
+        if weight < min_phrase_count:
+            dropped += 1
+            continue
+        add(phrase, syllables, weight)
+        kept += 1
+
+    print(f"single-char entries: {len(single_readings)}", file=sys.stderr)
+    print(f"multi-char phrases kept: {kept}, dropped (no/low freq): {dropped}",
+          file=sys.stderr)
+    print(f"total entries: {len(entries)}", file=sys.stderr)
+
+    OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(OUT_PATH, "w", encoding="utf-8") as out:
+        out.write("# word\tbopomofo-syllables (space separated)\tfrequency-weight\n")
+        out.write("# Generated by tools/build_dictionary.py -- do not edit by hand.\n")
+        for (word, reading), weight in sorted(entries.items()):
+            out.write(f"{word}\t{reading}\t{weight}\n")
+
+    print(f"wrote {OUT_PATH}", file=sys.stderr)
+
+
+if __name__ == "__main__":
+    main()
