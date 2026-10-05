@@ -123,7 +123,7 @@ class CompositionEditSession final : public ITfEditSession {
   }
 
  private:
-  ~CompositionEditSession() override {
+  ~CompositionEditSession() {
     if (context_ != nullptr) {
       context_->Release();
     }

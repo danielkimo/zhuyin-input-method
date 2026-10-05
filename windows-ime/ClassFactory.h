@@ -20,7 +20,7 @@ class ClassFactory final : public IClassFactory {
   STDMETHODIMP LockServer(BOOL lock) override;
 
  private:
-  ~ClassFactory() override;
+  ~ClassFactory();
 
   LONG ref_count_;
 };

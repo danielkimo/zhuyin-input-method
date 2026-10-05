@@ -161,7 +161,7 @@ SIZE CandidateWindow::MeasureWindow(HDC dc) const {
     SIZE line_size = {};
     if (GetTextExtentPoint32W(dc, line.c_str(),
                               static_cast<int>(line.size()), &line_size)) {
-      width = std::max(width, line_size.cx + 16);
+      width = std::max(width, static_cast<int>(line_size.cx) + 16);
     }
   }
 

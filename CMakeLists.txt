@@ -5,6 +5,10 @@ option(ZHUYIN_BUILD_TESTS "Build the cross-platform engine's unit tests / demo C
 
 enable_testing()
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 add_subdirectory(engine)
 
 if(WIN32)

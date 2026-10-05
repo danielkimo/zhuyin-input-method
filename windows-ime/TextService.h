@@ -14,8 +14,6 @@
 
 namespace zhuyin::windowsime {
 
-class CompositionEditSession;
-
 class TextService final : public ITfTextInputProcessorEx,
                           public ITfKeyEventSink,
                           public ITfCompositionSink {
@@ -42,7 +40,7 @@ class TextService final : public ITfTextInputProcessorEx,
                        BOOL* eaten) override;
   STDMETHODIMP OnPreservedKey(ITfContext* context, REFGUID guid,
                               BOOL* eaten) override;
-  STDMETHODIMP OnReleaseContext(ITfContext* context) override;
+  STDMETHODIMP OnReleaseContext(ITfContext* context);
 
   STDMETHODIMP OnCompositionTerminated(TfEditCookie edit_cookie,
                                        ITfComposition* composition) override;
@@ -55,7 +53,7 @@ class TextService final : public ITfTextInputProcessorEx,
   void ResetState();
 
  private:
-  ~TextService() override;
+  ~TextService();
 
   struct FixedSegment {
     std::wstring text;

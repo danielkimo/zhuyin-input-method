@@ -24,14 +24,13 @@ if(WIN32)
       zhuyin_engine
       gdi32
       imm32
-      msctf
       ole32
       oleaut32
       user32
       uuid
   )
 
-  target_compile_definitions(zhuyin_ime PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN)
+  target_compile_definitions(zhuyin_ime PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
   set_target_properties(zhuyin_ime PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED YES
