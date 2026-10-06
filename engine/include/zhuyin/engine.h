@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace zhuyin {
@@ -136,9 +137,20 @@ class Dictionary {
       const std::vector<std::string>& syllables, size_t start,
       size_t len) const;
 
+  // Reverse lookup: returns the distinct reading(s) (each a space-joined
+  // Bopomofo syllable sequence, same format as Lookup's key) under which
+  // `text` appears verbatim as a dictionary entry. Used for post-commit
+  // reconversion, where only already-committed Han characters are
+  // available -- with no original keystrokes to fall back on -- so the
+  // engine has to recover a plausible reading before it can offer homophone
+  // alternatives. Empty if `text` never appears as a whole entry.
+  std::vector<std::string> ReadingsForText(const std::string& text) const;
+
  private:
   // Key: syllables joined with a single space, e.g. "ㄗㄞˋ ㄓㄜˋ ㄌㄧˇ".
   std::vector<std::pair<std::string, std::vector<DictionaryEntry>>> entries_;
+  // text -> distinct readings it appears under, built alongside entries_.
+  std::unordered_map<std::string, std::vector<std::string>> reverse_index_;
   // Sorted for binary search; built lazily after loading.
   bool sorted_ = false;
   size_t max_phrase_length_ = 1;

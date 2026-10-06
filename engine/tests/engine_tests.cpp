@@ -164,6 +164,27 @@ void TestGetCandidatesAtOffersBothHomophones() {
   CHECK_EQ(candidates[0].text, std::string("在"));
 }
 
+void TestReadingsForTextReverseLookup() {
+  // Used by post-commit reconversion: given already-committed Han
+  // characters (no original keystrokes), recover a reading so the decoder
+  // can offer homophone alternatives.
+  Dictionary dict;
+  CHECK(dict.LoadFromString(kSampleDictionary));
+
+  const std::vector<std::string> zai_readings = dict.ReadingsForText("在");
+  CHECK(zai_readings.size() == 1);
+  CHECK_EQ(zai_readings[0], std::string("ㄗㄞˋ"));
+
+  // Multi-character phrases that appear verbatim as their own entry must
+  // also be reverse-lookup-able (whole-phrase reconversion).
+  const std::vector<std::string> phrase_readings = dict.ReadingsForText("再一次");
+  CHECK(phrase_readings.size() == 1);
+  CHECK_EQ(phrase_readings[0], std::string("ㄗㄞˋ ㄧ ㄘˋ"));
+
+  // Unknown text has no reading to recover.
+  CHECK(dict.ReadingsForText("不存在的詞").empty());
+}
+
 int main() {
   TestKeyboardMapping();
   TestSyllableComposerBasicSyllable();
@@ -173,6 +194,7 @@ int main() {
   TestDecoderPrefersReAgainOverZaiInLongerPhrase();
   TestDecoderPrefersZaiHereOverReHere();
   TestGetCandidatesAtOffersBothHomophones();
+  TestReadingsForTextReverseLookup();
 
   if (g_failures == 0) {
     std::printf("All tests passed.\n");

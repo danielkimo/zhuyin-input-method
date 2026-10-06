@@ -106,6 +106,24 @@ bool Dictionary::LoadFromString(const std::string& tsv_text) {
   std::sort(entries_.begin(), entries_.end(),
             [](const auto& a, const auto& b) { return a.first < b.first; });
 
+  // Build the reverse (text -> readings) index used by post-commit
+  // reconversion. Cross-group frequency isn't preserved here (each group's
+  // own entries are already weight-sorted, but texts that are ambiguous
+  // across *different* reading groups aren't re-ranked against each other)
+  // since reconversion just needs *a* plausible reading to seed candidate
+  // lookup, not the single globally-best one.
+  reverse_index_.clear();
+  for (const auto& kv : entries_) {
+    for (const auto& entry : kv.second) {
+      reverse_index_[entry.text].push_back(kv.first);
+    }
+  }
+  for (auto& kv : reverse_index_) {
+    auto& readings = kv.second;
+    std::sort(readings.begin(), readings.end());
+    readings.erase(std::unique(readings.begin(), readings.end()), readings.end());
+  }
+
   max_phrase_length_ = max_len;
   sorted_ = true;
   return true;
@@ -132,6 +150,14 @@ const std::vector<DictionaryEntry>* Dictionary::Lookup(
 void Dictionary::EnsureSorted() const {
   // Sorting happens eagerly in LoadFromString; kept as a no-op hook in case
   // future mutation paths are added.
+}
+
+std::vector<std::string> Dictionary::ReadingsForText(const std::string& text) const {
+  const auto it = reverse_index_.find(text);
+  if (it == reverse_index_.end()) {
+    return {};
+  }
+  return it->second;
 }
 
 }  // namespace zhuyin

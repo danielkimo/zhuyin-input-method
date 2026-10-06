@@ -3,6 +3,7 @@
 #include "TextService.h"
 
 #include <Windows.h>
+#include <ctffunc.h>
 #include <msctf.h>
 
 #include <algorithm>
@@ -10,6 +11,7 @@
 #include <cwctype>
 #include <memory>
 #include <new>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,6 +141,146 @@ class CompositionEditSession final : public ITfEditSession {
   bool cancel_text_;
 };
 
+// Mirrors CompositionEditSession's pattern (call back into public TextService
+// methods only) for the ITfFnReconversion::Reconvert path: reads the
+// caller-supplied already-committed range and starts a fresh composition
+// directly on it.
+class ReconvertEditSession final : public ITfEditSession {
+ public:
+  ReconvertEditSession(TextService* service, ITfContext* context, ITfRange* range)
+      : ref_count_(1), service_(service), context_(context), range_(range) {
+    if (service_ != nullptr) {
+      service_->AddRef();
+    }
+    if (context_ != nullptr) {
+      context_->AddRef();
+    }
+    if (range_ != nullptr) {
+      range_->AddRef();
+    }
+  }
+
+  STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override {
+    if (ppvObject == nullptr) {
+      return E_INVALIDARG;
+    }
+    *ppvObject = nullptr;
+
+    if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+      *ppvObject = static_cast<ITfEditSession*>(this);
+    } else {
+      return E_NOINTERFACE;
+    }
+
+    AddRef();
+    return S_OK;
+  }
+
+  STDMETHODIMP_(ULONG) AddRef() override {
+    return static_cast<ULONG>(InterlockedIncrement(&ref_count_));
+  }
+
+  STDMETHODIMP_(ULONG) Release() override {
+    const ULONG remaining = static_cast<ULONG>(InterlockedDecrement(&ref_count_));
+    if (remaining == 0) {
+      delete this;
+    }
+    return remaining;
+  }
+
+  STDMETHODIMP DoEditSession(TfEditCookie edit_cookie) override {
+    return service_->PerformReconversion(edit_cookie, context_, range_);
+  }
+
+ private:
+  ~ReconvertEditSession() {
+    if (range_ != nullptr) {
+      range_->Release();
+    }
+    if (context_ != nullptr) {
+      context_->Release();
+    }
+    if (service_ != nullptr) {
+      service_->Release();
+    }
+  }
+
+  LONG ref_count_;
+  TextService* service_;
+  ITfContext* context_;
+  ITfRange* range_;
+};
+
+// Backs ITfFnReconversion::QueryRange, which (unlike Reconvert) is not handed
+// an edit cookie directly -- the implementation has to open its own
+// ITfEditSession to safely inspect/clone the caller-supplied range.
+class QueryRangeEditSession final : public ITfEditSession {
+ public:
+  QueryRangeEditSession(TextService* service, ITfRange* range,
+                        ITfRange** new_range, BOOL* convertible)
+      : ref_count_(1),
+        service_(service),
+        range_(range),
+        new_range_(new_range),
+        convertible_(convertible) {
+    if (service_ != nullptr) {
+      service_->AddRef();
+    }
+    if (range_ != nullptr) {
+      range_->AddRef();
+    }
+  }
+
+  STDMETHODIMP QueryInterface(REFIID riid, void** ppvObject) override {
+    if (ppvObject == nullptr) {
+      return E_INVALIDARG;
+    }
+    *ppvObject = nullptr;
+
+    if (riid == IID_IUnknown || riid == IID_ITfEditSession) {
+      *ppvObject = static_cast<ITfEditSession*>(this);
+    } else {
+      return E_NOINTERFACE;
+    }
+
+    AddRef();
+    return S_OK;
+  }
+
+  STDMETHODIMP_(ULONG) AddRef() override {
+    return static_cast<ULONG>(InterlockedIncrement(&ref_count_));
+  }
+
+  STDMETHODIMP_(ULONG) Release() override {
+    const ULONG remaining = static_cast<ULONG>(InterlockedDecrement(&ref_count_));
+    if (remaining == 0) {
+      delete this;
+    }
+    return remaining;
+  }
+
+  STDMETHODIMP DoEditSession(TfEditCookie edit_cookie) override {
+    return service_->ExtendReconversionRange(edit_cookie, range_, new_range_,
+                                             convertible_);
+  }
+
+ private:
+  ~QueryRangeEditSession() {
+    if (range_ != nullptr) {
+      range_->Release();
+    }
+    if (service_ != nullptr) {
+      service_->Release();
+    }
+  }
+
+  LONG ref_count_;
+  TextService* service_;
+  ITfRange* range_;
+  ITfRange** new_range_;
+  BOOL* convertible_;
+};
+
 }  // namespace
 
 TextService::TextService()
@@ -148,7 +290,8 @@ TextService::TextService()
       thread_mgr_(nullptr),
       composition_(nullptr),
       engine_loaded_(false),
-      engine_attempted_(false) {
+      engine_attempted_(false),
+      nav_segment_index_(-1) {
   DllAddRef();
 }
 
@@ -178,6 +321,12 @@ STDMETHODIMP TextService::QueryInterface(REFIID riid, void** ppvObject) {
     *ppvObject = static_cast<ITfKeyEventSink*>(this);
   } else if (riid == IID_ITfCompositionSink) {
     *ppvObject = static_cast<ITfCompositionSink*>(this);
+  } else if (riid == IID_ITfFunctionProvider) {
+    *ppvObject = static_cast<ITfFunctionProvider*>(this);
+  } else if (riid == IID_ITfFnReconversion) {
+    *ppvObject = static_cast<ITfFnReconversion*>(this);
+  } else if (riid == IID_ITfFunction) {
+    *ppvObject = static_cast<ITfFunction*>(this);
   } else {
     return E_NOINTERFACE;
   }
@@ -393,6 +542,7 @@ void TextService::ResetState() {
   pending_syllables_.clear();
   fixed_segments_.clear();
   visible_candidates_.clear();
+  nav_segment_index_ = -1;
   HideCandidateWindow();
 }
 
@@ -490,6 +640,8 @@ bool TextService::ShouldHandleKey(WPARAM wParam) const {
       case VK_ESCAPE:
       case VK_RETURN:
       case VK_SPACE:
+      case VK_LEFT:
+      case VK_RIGHT:
         return true;
       default:
         break;
@@ -545,6 +697,12 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
     if (wParam == VK_RETURN || wParam == VK_SPACE) {
       return HandleCommit(context);
     }
+    if (wParam == VK_LEFT) {
+      return HandleArrowKey(context, false);
+    }
+    if (wParam == VK_RIGHT) {
+      return HandleArrowKey(context, true);
+    }
     if (wParam >= '1' && wParam <= '9') {
       return HandleCandidateSelection(context, static_cast<size_t>(wParam - '0'));
     }
@@ -568,6 +726,7 @@ bool TextService::HandleMappedSymbolKey(ITfContext* context, char ascii_key) {
   }
 
   EnsureEngineLoaded();
+  nav_segment_index_ = -1;  // typing exits segment-navigation mode
 
   if (syllable_composer_.HasFinal() && zhuyin::BopomofoKeyboard::IsInitialSymbol(symbol)) {
     CommitCurrentSyllable();
@@ -595,6 +754,7 @@ bool TextService::HandleMappedSymbolKey(ITfContext* context, char ascii_key) {
 }
 
 bool TextService::HandleBackspace(ITfContext* context) {
+  nav_segment_index_ = -1;  // typing/deleting exits segment-navigation mode
   bool changed = false;
   if (!syllable_composer_.Empty()) {
     changed = syllable_composer_.BackspaceSymbol();
@@ -640,28 +800,107 @@ bool TextService::HandleEscape(ITfContext* context) {
   return SUCCEEDED(hr);
 }
 
+bool TextService::HandleArrowKey(ITfContext* context, bool move_right) {
+  if (!syllable_composer_.Empty()) {
+    if (syllable_composer_.HasFinal()) {
+      CommitCurrentSyllable();
+    } else {
+      // An incomplete syllable is still being typed; let the keystroke fall
+      // through rather than starting navigation over a partial segment.
+      return false;
+    }
+  }
+
+  const std::vector<LogicalSegment> segments = BuildLogicalSegments();
+  if (segments.empty()) {
+    return false;
+  }
+
+  if (!move_right) {
+    if (nav_segment_index_ < 0) {
+      nav_segment_index_ = static_cast<int>(segments.size()) - 1;
+    } else if (nav_segment_index_ > 0) {
+      --nav_segment_index_;
+    }
+  } else {
+    if (nav_segment_index_ < 0) {
+      return false;
+    }
+    if (nav_segment_index_ < static_cast<int>(segments.size()) - 1) {
+      ++nav_segment_index_;
+    } else {
+      nav_segment_index_ = -1;  // moved past the last segment; back to normal typing
+    }
+  }
+
+  RefreshVisibleCandidates();
+  return SUCCEEDED(RequestEditSession(context, false, false));
+}
+
 bool TextService::HandleCandidateSelection(ITfContext* context,
                                            size_t one_based_index) {
   RefreshVisibleCandidates();
-  if (one_based_index == 0 || one_based_index > visible_candidates_.size() ||
-      pending_syllables_.empty()) {
+  if (one_based_index == 0 || one_based_index > visible_candidates_.size()) {
     return true;
   }
-
   const zhuyin::Candidate selected = visible_candidates_[one_based_index - 1];
-  if (selected.syllable_count == 0 ||
-      selected.syllable_count > pending_syllables_.size()) {
-    return true;
+
+  if (nav_segment_index_ < 0) {
+    if (pending_syllables_.empty() || selected.syllable_count == 0 ||
+        selected.syllable_count > pending_syllables_.size()) {
+      return true;
+    }
+    FixedSegment fixed_segment;
+    fixed_segment.text = Utf8ToWide(selected.text);
+    fixed_segment.syllables.assign(
+        pending_syllables_.begin(),
+        pending_syllables_.begin() +
+            static_cast<std::ptrdiff_t>(selected.syllable_count));
+    fixed_segments_.push_back(std::move(fixed_segment));
+    pending_syllables_.erase(pending_syllables_.begin(),
+                             pending_syllables_.begin() +
+                                 static_cast<std::ptrdiff_t>(selected.syllable_count));
+  } else {
+    // Reselecting a specific logical segment while navigating: lock in every
+    // segment up to and including the targeted one (converting any
+    // auto-decoded segments before it into fixed segments too, so the
+    // targeted choice doesn't get re-decoded differently next refresh), and
+    // re-slice whatever syllables remain after it back into pending_syllables_.
+    const std::vector<LogicalSegment> segments = BuildLogicalSegments();
+    if (nav_segment_index_ >= static_cast<int>(segments.size())) {
+      nav_segment_index_ = -1;
+      RefreshVisibleCandidates();
+      return true;
+    }
+    const std::vector<std::string> all_syllables = AllSyllables();
+    const size_t offset = SegmentSyllableOffset(segments, nav_segment_index_);
+    if (selected.syllable_count == 0 ||
+        offset + selected.syllable_count > all_syllables.size()) {
+      return true;
+    }
+
+    std::vector<FixedSegment> new_fixed;
+    new_fixed.reserve(static_cast<size_t>(nav_segment_index_) + 1);
+    for (int i = 0; i < nav_segment_index_; ++i) {
+      new_fixed.push_back({segments[i].text, segments[i].syllables});
+    }
+    FixedSegment target;
+    target.text = Utf8ToWide(selected.text);
+    target.syllables.assign(
+        all_syllables.begin() + static_cast<std::ptrdiff_t>(offset),
+        all_syllables.begin() +
+            static_cast<std::ptrdiff_t>(offset + selected.syllable_count));
+    new_fixed.push_back(std::move(target));
+
+    std::vector<std::string> remaining(
+        all_syllables.begin() +
+            static_cast<std::ptrdiff_t>(offset + selected.syllable_count),
+        all_syllables.end());
+
+    fixed_segments_ = std::move(new_fixed);
+    pending_syllables_ = std::move(remaining);
+    nav_segment_index_ = -1;  // back to normal append mode after reselection
   }
-  FixedSegment fixed_segment;
-  fixed_segment.text = Utf8ToWide(selected.text);
-  fixed_segment.syllables.assign(pending_syllables_.begin(),
-                                 pending_syllables_.begin() +
-                                     static_cast<std::ptrdiff_t>(selected.syllable_count));
-  fixed_segments_.push_back(std::move(fixed_segment));
-  pending_syllables_.erase(
-      pending_syllables_.begin(),
-      pending_syllables_.begin() + static_cast<std::ptrdiff_t>(selected.syllable_count));
 
   RefreshVisibleCandidates();
   return SUCCEEDED(RequestEditSession(context, false, false));
@@ -689,13 +928,92 @@ bool TextService::RestorePreviousFixedSegment() {
 
 void TextService::RefreshVisibleCandidates() {
   visible_candidates_.clear();
-  if (pending_syllables_.empty() || decoder_ == nullptr) {
+  if (decoder_ == nullptr) {
     return;
   }
-  visible_candidates_ = decoder_->GetCandidatesAt(pending_syllables_, 0);
+
+  if (nav_segment_index_ < 0) {
+    if (pending_syllables_.empty()) {
+      return;
+    }
+    visible_candidates_ = decoder_->GetCandidatesAt(pending_syllables_, 0);
+  } else {
+    const std::vector<LogicalSegment> segments = BuildLogicalSegments();
+    if (segments.empty() || nav_segment_index_ >= static_cast<int>(segments.size())) {
+      nav_segment_index_ = -1;
+      return;
+    }
+    const std::vector<std::string> all_syllables = AllSyllables();
+    const size_t offset = SegmentSyllableOffset(segments, nav_segment_index_);
+    if (offset >= all_syllables.size()) {
+      nav_segment_index_ = -1;
+      return;
+    }
+    visible_candidates_ = decoder_->GetCandidatesAt(all_syllables, offset);
+  }
+
   if (visible_candidates_.size() > 9) {
     visible_candidates_.resize(9);
   }
+}
+
+std::vector<std::string> TextService::AllSyllables() const {
+  std::vector<std::string> all;
+  for (const auto& fixed : fixed_segments_) {
+    all.insert(all.end(), fixed.syllables.begin(), fixed.syllables.end());
+  }
+  all.insert(all.end(), pending_syllables_.begin(), pending_syllables_.end());
+  return all;
+}
+
+std::vector<TextService::LogicalSegment> TextService::BuildLogicalSegments() const {
+  std::vector<LogicalSegment> segments;
+  segments.reserve(fixed_segments_.size() + pending_syllables_.size());
+  for (const auto& fixed : fixed_segments_) {
+    segments.push_back({fixed.text, fixed.syllables});
+  }
+
+  if (pending_syllables_.empty()) {
+    return segments;
+  }
+
+  if (decoder_ == nullptr) {
+    for (const auto& syllable : pending_syllables_) {
+      segments.push_back({Utf8ToWide(syllable), {syllable}});
+    }
+    return segments;
+  }
+
+  const std::vector<zhuyin::Candidate> sentence =
+      decoder_->ComposeBestSentence(pending_syllables_);
+  size_t offset = 0;
+  for (const auto& candidate : sentence) {
+    size_t count = candidate.syllable_count;
+    if (count == 0 || offset + count > pending_syllables_.size()) {
+      // Defensive fallback in case the decoder ever returns an inconsistent
+      // syllable count; fall back to a single-syllable segment so navigation
+      // never reads out of bounds.
+      count = 1;
+    }
+    count = std::min(count, pending_syllables_.size() - offset);
+    LogicalSegment segment;
+    segment.text = Utf8ToWide(candidate.text);
+    segment.syllables.assign(pending_syllables_.begin() + static_cast<std::ptrdiff_t>(offset),
+                             pending_syllables_.begin() +
+                                 static_cast<std::ptrdiff_t>(offset + count));
+    segments.push_back(std::move(segment));
+    offset += count;
+  }
+  return segments;
+}
+
+size_t TextService::SegmentSyllableOffset(const std::vector<LogicalSegment>& segments,
+                                          int segment_index) const {
+  size_t offset = 0;
+  for (int i = 0; i < segment_index && i < static_cast<int>(segments.size()); ++i) {
+    offset += segments[i].syllables.size();
+  }
+  return offset;
 }
 
 std::wstring TextService::BuildDecodedPendingText() const {
@@ -794,20 +1112,46 @@ void TextService::UpdateCandidateWindow(TfEditCookie edit_cookie,
                     Utf8ToWide(visible_candidates_[i].text));
   }
 
+  // While navigating a specific logical segment (Left/Right arrows), position
+  // the popup over just that segment instead of the whole composition.
+  ITfRange* measure_range = range;
+  ITfRange* segment_range = nullptr;
+  size_t char_offset = 0;
+  size_t char_length = 0;
+  if (nav_segment_index_ >= 0 &&
+      ComputeNavSegmentCharRange(&char_offset, &char_length) && char_length > 0) {
+    if (SUCCEEDED(range->Clone(&segment_range)) && segment_range != nullptr) {
+      segment_range->Collapse(edit_cookie, TF_ANCHOR_START);
+      LONG shifted = 0;
+      segment_range->ShiftEnd(edit_cookie,
+                             static_cast<LONG>(char_offset + char_length), &shifted,
+                             nullptr);
+      segment_range->ShiftStart(edit_cookie, static_cast<LONG>(char_offset), &shifted,
+                                nullptr);
+      measure_range = segment_range;
+    }
+  }
+
   ITfContextView* context_view = nullptr;
   if (FAILED(context->GetActiveView(&context_view)) || context_view == nullptr) {
+    if (segment_range != nullptr) {
+      segment_range->Release();
+    }
     HideCandidateWindow();
     return;
   }
 
   RECT rect = {};
   BOOL clipped = FALSE;
-  if (FAILED(context_view->GetTextExt(edit_cookie, range, &rect, &clipped))) {
-    context_view->Release();
+  const HRESULT hr = context_view->GetTextExt(edit_cookie, measure_range, &rect, &clipped);
+  context_view->Release();
+  if (segment_range != nullptr) {
+    segment_range->Release();
+  }
+  if (FAILED(hr)) {
     HideCandidateWindow();
     return;
   }
-  context_view->Release();
 
   if (clipped) {
     HideCandidateWindow();
@@ -821,6 +1165,27 @@ void TextService::UpdateCandidateWindow(TfEditCookie edit_cookie,
 }
 
 void TextService::HideCandidateWindow() { candidate_window_.Hide(); }
+
+bool TextService::ComputeNavSegmentCharRange(size_t* offset, size_t* length) const {
+  if (nav_segment_index_ < 0) {
+    return false;
+  }
+  const std::vector<LogicalSegment> segments = BuildLogicalSegments();
+  if (nav_segment_index_ >= static_cast<int>(segments.size())) {
+    return false;
+  }
+  size_t char_offset = 0;
+  for (int i = 0; i < nav_segment_index_; ++i) {
+    char_offset += segments[i].text.size();
+  }
+  if (offset != nullptr) {
+    *offset = char_offset;
+  }
+  if (length != nullptr) {
+    *length = segments[nav_segment_index_].text.size();
+  }
+  return true;
+}
 
 char TextService::VirtualKeyToAscii(WPARAM wParam) const {
   if (wParam >= 'A' && wParam <= 'Z') {
@@ -843,6 +1208,233 @@ char TextService::VirtualKeyToAscii(WPARAM wParam) const {
     default:
       return '\0';
   }
+}
+
+STDMETHODIMP TextService::GetType(GUID* guid) {
+  if (guid == nullptr) {
+    return E_INVALIDARG;
+  }
+  *guid = kTextServiceClsid;
+  return S_OK;
+}
+
+STDMETHODIMP TextService::GetDescription(BSTR* description) {
+  if (description == nullptr) {
+    return E_INVALIDARG;
+  }
+  *description = SysAllocString(kTextServiceDescription);
+  return (*description != nullptr) ? S_OK : E_OUTOFMEMORY;
+}
+
+STDMETHODIMP TextService::GetFunction(REFGUID /*guid_service*/, REFIID riid,
+                                     IUnknown** function) {
+  if (function == nullptr) {
+    return E_INVALIDARG;
+  }
+  *function = nullptr;
+  if (riid != IID_ITfFnReconversion && riid != IID_ITfFunction) {
+    return E_NOINTERFACE;
+  }
+  return QueryInterface(riid, reinterpret_cast<void**>(function));
+}
+
+STDMETHODIMP TextService::GetDisplayName(BSTR* name) {
+  if (name == nullptr) {
+    return E_INVALIDARG;
+  }
+  *name = SysAllocString(kTextServiceDisplayName);
+  return (*name != nullptr) ? S_OK : E_OUTOFMEMORY;
+}
+
+STDMETHODIMP TextService::QueryRange(ITfRange* range, ITfRange** new_range,
+                                    BOOL* convertible) {
+  if (range == nullptr || new_range == nullptr || convertible == nullptr) {
+    return E_INVALIDARG;
+  }
+  *new_range = nullptr;
+  *convertible = FALSE;
+
+  ITfContext* context = nullptr;
+  HRESULT hr = range->GetContext(&context);
+  if (FAILED(hr) || context == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+
+  auto* edit_session = new (std::nothrow) QueryRangeEditSession(
+      this, range, new_range, convertible);
+  if (edit_session == nullptr) {
+    context->Release();
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT session_hr = E_FAIL;
+  hr = context->RequestEditSession(client_id_, edit_session,
+                                   TF_ES_SYNC | TF_ES_READ, &session_hr);
+  edit_session->Release();
+  context->Release();
+  if (FAILED(hr)) {
+    return hr;
+  }
+  return session_hr;
+}
+
+STDMETHODIMP TextService::GetReconversion(ITfRange* /*range*/,
+                                         ITfCandidateList** candidate_list) {
+  // Only Reconvert() (invoked by the OS's built-in "Reconversion" command) is
+  // implemented; a host that instead drives its own candidate UI via this
+  // alternate path isn't supported yet.
+  if (candidate_list != nullptr) {
+    *candidate_list = nullptr;
+  }
+  return E_NOTIMPL;
+}
+
+STDMETHODIMP TextService::Reconvert(ITfRange* range) {
+  if (range == nullptr) {
+    return E_INVALIDARG;
+  }
+
+  ITfContext* context = nullptr;
+  HRESULT hr = range->GetContext(&context);
+  if (FAILED(hr) || context == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+
+  auto* edit_session = new (std::nothrow) ReconvertEditSession(this, context, range);
+  if (edit_session == nullptr) {
+    context->Release();
+    return E_OUTOFMEMORY;
+  }
+
+  HRESULT session_hr = E_FAIL;
+  hr = context->RequestEditSession(client_id_, edit_session,
+                                   TF_ES_SYNC | TF_ES_READWRITE, &session_hr);
+  edit_session->Release();
+  context->Release();
+  if (FAILED(hr)) {
+    return hr;
+  }
+  return session_hr;
+}
+
+HRESULT TextService::ExtendReconversionRange(TfEditCookie edit_cookie,
+                                             ITfRange* range,
+                                             ITfRange** new_range,
+                                             BOOL* convertible) {
+  if (range == nullptr || new_range == nullptr || convertible == nullptr) {
+    return E_INVALIDARG;
+  }
+  *new_range = nullptr;
+  *convertible = FALSE;
+
+  EnsureEngineLoaded();
+
+  ITfRange* clone = nullptr;
+  HRESULT hr = range->Clone(&clone);
+  if (FAILED(hr) || clone == nullptr) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+
+  BOOL is_empty = FALSE;
+  hr = clone->IsEmpty(edit_cookie, &is_empty);
+  if (FAILED(hr)) {
+    clone->Release();
+    return hr;
+  }
+
+  if (is_empty) {
+    // No selection: offer the single character immediately before an empty
+    // caret, matching the New Phonetic "reconvert the last character" UX.
+    LONG shifted = 0;
+    hr = clone->ShiftStart(edit_cookie, -1, &shifted, nullptr);
+    if (FAILED(hr) || shifted == 0) {
+      clone->Release();
+      return S_OK;  // nothing to the left of the caret; *convertible stays FALSE
+    }
+  }
+
+  WCHAR buffer[256];
+  ULONG fetched = 0;
+  hr = clone->GetText(edit_cookie, 0, buffer, _countof(buffer) - 1, &fetched);
+  if (FAILED(hr) || fetched == 0) {
+    clone->Release();
+    return S_OK;
+  }
+  buffer[fetched] = L'\0';
+
+  if (dictionary_.ReadingsForText(WideToUtf8(std::wstring(buffer, fetched))).empty()) {
+    // Not a phrase/character our dictionary recognizes a reading for; report
+    // not-convertible rather than offering a reconversion we can't fulfill.
+    clone->Release();
+    return S_OK;
+  }
+
+  *new_range = clone;  // ownership transferred to the caller
+  *convertible = TRUE;
+  return S_OK;
+}
+
+HRESULT TextService::PerformReconversion(TfEditCookie edit_cookie,
+                                         ITfContext* context, ITfRange* range) {
+  if (context == nullptr || range == nullptr) {
+    return E_INVALIDARG;
+  }
+
+  EnsureEngineLoaded();
+  if (decoder_ == nullptr) {
+    return E_FAIL;
+  }
+
+  WCHAR buffer[256];
+  ULONG fetched = 0;
+  HRESULT hr = range->GetText(edit_cookie, 0, buffer, _countof(buffer) - 1, &fetched);
+  if (FAILED(hr) || fetched == 0) {
+    return FAILED(hr) ? hr : E_FAIL;
+  }
+  buffer[fetched] = L'\0';
+  const std::string text = WideToUtf8(std::wstring(buffer, fetched));
+
+  const std::vector<std::string> readings = dictionary_.ReadingsForText(text);
+  if (readings.empty()) {
+    return E_FAIL;
+  }
+
+  // Multiple readings are possible for an ambiguous polyphone; the first
+  // (by the dictionary's own sort order) is used to seed candidates --
+  // the user can still pick a different homophone from the reopened list.
+  std::vector<std::string> syllables;
+  std::istringstream reading_stream(readings.front());
+  std::string syllable;
+  while (reading_stream >> syllable) {
+    syllables.push_back(syllable);
+  }
+  if (syllables.empty()) {
+    return E_FAIL;
+  }
+
+  // Abandon any in-progress typing composition state; reconversion always
+  // starts a fresh composition directly on the caller-supplied range.
+  ResetState();
+  pending_syllables_ = std::move(syllables);
+
+  ITfContextComposition* context_composition = nullptr;
+  hr = context->QueryInterface(IID_ITfContextComposition,
+                               reinterpret_cast<void**>(&context_composition));
+  if (FAILED(hr)) {
+    pending_syllables_.clear();
+    return hr;
+  }
+
+  hr = context_composition->StartComposition(edit_cookie, range, this, &composition_);
+  context_composition->Release();
+  if (FAILED(hr)) {
+    pending_syllables_.clear();
+    return hr;
+  }
+
+  RefreshVisibleCandidates();
+  UpdateCandidateWindow(edit_cookie, context, range);
+  return S_OK;
 }
 
 }  // namespace zhuyin::windowsime
