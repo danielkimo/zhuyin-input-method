@@ -647,7 +647,15 @@ bool TextService::ShouldHandleKey(WPARAM wParam) const {
         break;
     }
 
-    if ((wParam >= '1' && wParam <= '9') || (wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9)) {
+    // Digits double as both candidate-selection shortcuts and Bopomofo
+    // symbol/tone keys on the Dachen layout. Only treat them as candidate
+    // selection once the current syllable is fully composed (no in-progress
+    // initial/medial/final waiting for its tone); otherwise let them fall
+    // through to the normal mapped-key handling below so e.g. a tone key
+    // typed mid-syllable isn't swallowed with no effect.
+    if (syllable_composer_.Empty() &&
+        ((wParam >= '1' && wParam <= '9') ||
+         (wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9))) {
       return true;
     }
   }
@@ -703,10 +711,10 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
     if (wParam == VK_RIGHT) {
       return HandleArrowKey(context, true);
     }
-    if (wParam >= '1' && wParam <= '9') {
+    if (syllable_composer_.Empty() && wParam >= '1' && wParam <= '9') {
       return HandleCandidateSelection(context, static_cast<size_t>(wParam - '0'));
     }
-    if (wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9) {
+    if (syllable_composer_.Empty() && wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9) {
       return HandleCandidateSelection(context,
                                       static_cast<size_t>(wParam - VK_NUMPAD0));
     }
