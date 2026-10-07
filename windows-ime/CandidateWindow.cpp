@@ -6,9 +6,19 @@
 
 namespace zhuyin::windowsime {
 
-CandidateWindow::CandidateWindow() : hwnd_(nullptr), instance_(nullptr) {}
+CandidateWindow::CandidateWindow()
+    : hwnd_(nullptr),
+      instance_(nullptr),
+      highlighted_index_(static_cast<size_t>(-1)),
+      font_(nullptr) {}
 
-CandidateWindow::~CandidateWindow() { Destroy(); }
+CandidateWindow::~CandidateWindow() {
+  Destroy();
+  if (font_ != nullptr) {
+    DeleteObject(font_);
+    font_ = nullptr;
+  }
+}
 
 bool CandidateWindow::EnsureCreated(HINSTANCE instance) {
   if (hwnd_ != nullptr) {
@@ -30,7 +40,7 @@ bool CandidateWindow::EnsureCreated(HINSTANCE instance) {
 
   hwnd_ = CreateWindowExW(
       WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE, kWindowClassName,
-      L"", WS_POPUP | WS_BORDER, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+      L"", WS_POPUP, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
       CW_USEDEFAULT, nullptr, nullptr, instance_, this);
 
   return hwnd_ != nullptr;
@@ -55,20 +65,32 @@ bool CandidateWindow::IsVisible() const {
 
 void CandidateWindow::Show(
     const RECT& anchor_rect,
-    const std::vector<std::wstring>& numbered_candidates) {
+    const std::vector<std::wstring>& numbered_candidates,
+    size_t highlighted_index) {
   numbered_candidates_ = numbered_candidates;
+  highlighted_index_ = highlighted_index;
   if (!EnsureCreated(instance_ != nullptr ? instance_ : GetModuleHandleW(nullptr))) {
     return;
   }
 
   HDC dc = GetDC(hwnd_);
+  HFONT font = EnsureFont();
+  HGDIOBJ old_font = SelectObject(dc, font);
   const SIZE size = MeasureWindow(dc);
+  SelectObject(dc, old_font);
   ReleaseDC(hwnd_, dc);
 
   const int x = anchor_rect.left;
   const int y = anchor_rect.bottom + 2;
   SetWindowPos(hwnd_, HWND_TOPMOST, x, y, size.cx, size.cy,
                SWP_NOACTIVATE | SWP_SHOWWINDOW);
+
+  // Rounded-corner silhouette so the popup looks less like a plain 1990s
+  // dialog box.
+  HRGN region = CreateRoundRectRgn(0, 0, size.cx + 1, size.cy + 1,
+                                   kCornerRadius, kCornerRadius);
+  SetWindowRgn(hwnd_, region, TRUE);  // hwnd_ takes ownership of region
+
   InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -114,37 +136,73 @@ void CandidateWindow::Paint(HDC dc) {
   RECT client = {};
   GetClientRect(hwnd_, &client);
 
-  HBRUSH background = CreateSolidBrush(RGB(255, 255, 255));
+  // Soft light-gray background with a slightly darker, rounded border reads
+  // as a modern popup rather than a bare system dialog.
+  HBRUSH background = CreateSolidBrush(RGB(250, 250, 250));
   FillRect(dc, &client, background);
   DeleteObject(background);
 
-  HPEN border = CreatePen(PS_SOLID, 1, RGB(160, 160, 160));
+  HPEN border = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
   HGDIOBJ old_pen = SelectObject(dc, border);
   HGDIOBJ old_brush = SelectObject(dc, GetStockObject(HOLLOW_BRUSH));
-  Rectangle(dc, client.left, client.top, client.right, client.bottom);
+  RoundRect(dc, client.left, client.top, client.right - 1, client.bottom - 1,
+           kCornerRadius, kCornerRadius);
   SelectObject(dc, old_brush);
   SelectObject(dc, old_pen);
   DeleteObject(border);
 
+  HFONT font = EnsureFont();
+  HGDIOBJ old_font = SelectObject(dc, font);
   SetBkMode(dc, TRANSPARENT);
-  SetTextColor(dc, RGB(30, 30, 30));
-
-  RECT line_rect = client;
-  line_rect.left += 8;
-  line_rect.top += 6;
-  line_rect.right -= 8;
 
   TEXTMETRICW metrics = {};
   GetTextMetricsW(dc, &metrics);
-  const int line_height = metrics.tmHeight + 6;
+  const int line_height = metrics.tmHeight + 10;
+  const int padding_x = 10;
 
   for (size_t i = 0; i < numbered_candidates_.size(); ++i) {
-    RECT text_rect = line_rect;
-    text_rect.top += static_cast<LONG>(i * line_height);
-    text_rect.bottom = text_rect.top + line_height;
+    RECT row_rect = client;
+    row_rect.top = client.top + 4 + static_cast<LONG>(i * line_height);
+    row_rect.bottom = row_rect.top + line_height;
+    row_rect.left += 2;
+    row_rect.right -= 2;
+
+    if (i == highlighted_index_) {
+      // Rounded highlight pill behind the selected row, similar to how
+      // Microsoft New Phonetic highlights the arrow-key-selected candidate.
+      HBRUSH highlight_brush = CreateSolidBrush(RGB(51, 122, 230));
+      HGDIOBJ old_highlight_brush = SelectObject(dc, highlight_brush);
+      HPEN highlight_pen = CreatePen(PS_SOLID, 1, RGB(51, 122, 230));
+      HGDIOBJ old_highlight_pen = SelectObject(dc, highlight_pen);
+      RoundRect(dc, row_rect.left, row_rect.top, row_rect.right, row_rect.bottom,
+               6, 6);
+      SelectObject(dc, old_highlight_pen);
+      SelectObject(dc, old_highlight_brush);
+      DeleteObject(highlight_pen);
+      DeleteObject(highlight_brush);
+      SetTextColor(dc, RGB(255, 255, 255));
+    } else {
+      SetTextColor(dc, RGB(40, 40, 40));
+    }
+
+    RECT text_rect = row_rect;
+    text_rect.left += padding_x;
+    text_rect.right -= padding_x;
     DrawTextW(dc, numbered_candidates_[i].c_str(), -1, &text_rect,
               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
   }
+
+  SelectObject(dc, old_font);
+}
+
+HFONT CandidateWindow::EnsureFont() const {
+  if (font_ == nullptr) {
+    font_ = CreateFontW(
+        -16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE, L"Microsoft JhengHei UI");
+  }
+  return font_;
 }
 
 SIZE CandidateWindow::MeasureWindow(HDC dc) const {
@@ -155,18 +213,18 @@ SIZE CandidateWindow::MeasureWindow(HDC dc) const {
 
   TEXTMETRICW metrics = {};
   GetTextMetricsW(dc, &metrics);
-  const int line_height = metrics.tmHeight + 6;
-  int width = 140;
+  const int line_height = metrics.tmHeight + 10;
+  int width = 150;
   for (const auto& line : numbered_candidates_) {
     SIZE line_size = {};
     if (GetTextExtentPoint32W(dc, line.c_str(),
                               static_cast<int>(line.size()), &line_size)) {
-      width = std::max(width, static_cast<int>(line_size.cx) + 16);
+      width = std::max(width, static_cast<int>(line_size.cx) + 28);
     }
   }
 
   size.cx = width;
-  size.cy = std::max(24, static_cast<int>(numbered_candidates_.size()) * line_height + 12);
+  size.cy = std::max(24, static_cast<int>(numbered_candidates_.size()) * line_height + 8);
   return size;
 }
 

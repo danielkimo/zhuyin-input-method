@@ -118,6 +118,7 @@ class TextService final : public ITfTextInputProcessorEx,
   bool HandleCommit(ITfContext* context);
   bool HandleEscape(ITfContext* context);
   bool HandleArrowKey(ITfContext* context, bool move_right);
+  bool HandleCandidateHighlightKey(ITfContext* context, bool move_down);
   bool HandleCandidateSelection(ITfContext* context, size_t one_based_index);
   bool CommitCurrentSyllable();
   bool RestorePreviousFixedSegment();
@@ -158,6 +159,12 @@ class TextService final : public ITfTextInputProcessorEx,
   // logical segment `nav_segment_index_` (see BuildLogicalSegments) for
   // review/reselection instead of appending new input at the end.
   int nav_segment_index_;
+
+  // Zero-based row in visible_candidates_ currently highlighted by Up/Down
+  // navigation of the candidate popup. Reset to 0 whenever the candidate
+  // list itself changes (new typing, new segment targeted, etc.) so the
+  // highlight always starts on the top (best-scoring) choice.
+  size_t highlighted_candidate_index_;
 };
 
 }  // namespace zhuyin::windowsime

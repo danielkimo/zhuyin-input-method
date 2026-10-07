@@ -1,8 +1,11 @@
 @echo off
 setlocal
 
-REM Update DLL_PATH if your Visual Studio generator places the built DLL elsewhere.
-set "DLL_PATH=%~dp0..\build\windows-ime\Release\zhuyin_ime.dll"
+REM Prefer a DLL sitting right next to this script (the layout used by a
+REM packaged/portable install bundle); fall back to the dev build output
+REM path when running straight from a source checkout.
+set "DLL_PATH=%~dp0zhuyin_ime.dll"
+if not exist "%DLL_PATH%" set "DLL_PATH=%~dp0..\build\windows-ime\Release\zhuyin_ime.dll"
 
 net session >nul 2>&1
 if errorlevel 1 (

@@ -44,6 +44,16 @@ Two complementary ways to fix a wrong character/word, similar to Microsoft's New
 4. Ensure **Chinese (Traditional, Taiwan)** is installed, then add/select the keyboard entry for **Zhuyin AI 注音輸入法**.
 5. Switch to it from the language bar like any other installed IME/TIP.
 
+### Installing on a different PC (no Visual Studio / CMake needed)
+
+`zhuyin_ime.dll` is built with the MSVC runtime **statically linked** (`/MT`), so a target machine does not need the Visual C++ Redistributable installed — only `zhuyin_ime.dll` + `dictionary.tsv` + the registration scripts are needed.
+
+After building on the dev machine, run:
+```powershell
+powershell -ExecutionPolicy Bypass -File tools\package_installer.ps1
+```
+This produces `ZhuyinIME.zip` at the repository root, containing a flat, self-contained folder (`zhuyin_ime.dll`, `dictionary.tsv`, `register.bat`, `unregister.bat`, `README.txt`). Copy that zip to the other PC, extract it anywhere, then run `register.bat` as Administrator — no source checkout, build tools, or extra installs required there.
+
 ## Uninstall
 
 1. Switch away from the IME in the language bar.
@@ -52,7 +62,7 @@ Two complementary ways to fix a wrong character/word, similar to Microsoft's New
 
 ## Known limitations / TODO
 
-- Candidate popup is keyboard-driven only; mouse selection is not implemented yet.
+- Candidate popup supports Up/Down arrow keys to move a highlighted selection and Enter/number keys to confirm it, but mouse click-to-select is not implemented yet.
 - Candidate paging beyond the first 9 entries is still TODO.
 - Punctuation handling is intentionally minimal and should be expanded with a full symbol table.
 - No custom display-attribute provider/underline styling yet; TSF host default composition rendering is used.
@@ -60,4 +70,5 @@ Two complementary ways to fix a wrong character/word, similar to Microsoft's New
 - Pre-commit Left/Right segment navigation does not support in-place character editing (typing/Backspace while navigating exits navigation and falls back to append-at-end).
 - Post-commit reconversion (`ITfFnReconversion::GetReconversion`, the alternate host-driven candidate-list path) returns `E_NOTIMPL`; only `Reconvert()` (the path used by the OS's built-in "Reconversion" command) is implemented.
 - Reconversion seeds candidates from the *first* dictionary reading found for the selected text; a genuinely ambiguous polyphone may need a couple of extra candidate picks to reach the intended one.
-- Ship a signed installer (MSI/EXE) and signed binaries for real distribution.
+- Ship a signed installer (MSI/EXE) and signed binaries for real distribution (the portable zip from `tools\package_installer.ps1` still triggers an unsigned-binary SmartScreen warning).
+

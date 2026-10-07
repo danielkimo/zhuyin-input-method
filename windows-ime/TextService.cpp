@@ -291,7 +291,8 @@ TextService::TextService()
       composition_(nullptr),
       engine_loaded_(false),
       engine_attempted_(false),
-      nav_segment_index_(-1) {
+      nav_segment_index_(-1),
+      highlighted_candidate_index_(0) {
   DllAddRef();
 }
 
@@ -543,6 +544,7 @@ void TextService::ResetState() {
   fixed_segments_.clear();
   visible_candidates_.clear();
   nav_segment_index_ = -1;
+  highlighted_candidate_index_ = 0;
   HideCandidateWindow();
 }
 
@@ -647,6 +649,12 @@ bool TextService::ShouldHandleKey(WPARAM wParam) const {
         break;
     }
 
+    // Up/Down move the highlighted row in the candidate popup (like
+    // Microsoft New Phonetic); only meaningful while candidates are showing.
+    if ((wParam == VK_UP || wParam == VK_DOWN) && !visible_candidates_.empty()) {
+      return true;
+    }
+
     // Digits double as both candidate-selection shortcuts and Bopomofo
     // symbol/tone keys on the Dachen layout. Only treat them as candidate
     // selection once the current syllable is fully composed (no in-progress
@@ -703,6 +711,13 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
       return HandleEscape(context);
     }
     if (wParam == VK_RETURN) {
+      // If the user has navigated the candidate popup with Up/Down, Enter
+      // confirms whichever row is highlighted (matching Microsoft New
+      // Phonetic); otherwise it commits the whole composed phrase as-is.
+      if (!visible_candidates_.empty() && highlighted_candidate_index_ != 0) {
+        return HandleCandidateSelection(
+            context, highlighted_candidate_index_ + 1);
+      }
       return HandleCommit(context);
     }
     if (wParam == VK_SPACE) {
@@ -717,6 +732,10 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
         const char ascii_key = VirtualKeyToAscii(wParam);
         return ascii_key != '\0' && HandleMappedSymbolKey(context, ascii_key);
       }
+      if (!visible_candidates_.empty() && highlighted_candidate_index_ != 0) {
+        return HandleCandidateSelection(
+            context, highlighted_candidate_index_ + 1);
+      }
       return HandleCommit(context);
     }
     if (wParam == VK_LEFT) {
@@ -724,6 +743,12 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
     }
     if (wParam == VK_RIGHT) {
       return HandleArrowKey(context, true);
+    }
+    if (wParam == VK_UP) {
+      return HandleCandidateHighlightKey(context, false);
+    }
+    if (wParam == VK_DOWN) {
+      return HandleCandidateHighlightKey(context, true);
     }
     if (syllable_composer_.Empty() && wParam >= '1' && wParam <= '9') {
       return HandleCandidateSelection(context, static_cast<size_t>(wParam - '0'));
@@ -859,6 +884,26 @@ bool TextService::HandleArrowKey(ITfContext* context, bool move_right) {
   return SUCCEEDED(RequestEditSession(context, false, false));
 }
 
+bool TextService::HandleCandidateHighlightKey(ITfContext* context,
+                                              bool move_down) {
+  if (visible_candidates_.empty()) {
+    return false;
+  }
+
+  const size_t count = visible_candidates_.size();
+  if (move_down) {
+    highlighted_candidate_index_ = (highlighted_candidate_index_ + 1) % count;
+  } else {
+    highlighted_candidate_index_ =
+        (highlighted_candidate_index_ == 0) ? count - 1
+                                            : highlighted_candidate_index_ - 1;
+  }
+
+  // Only the popup's highlight changes; the composed text itself is
+  // untouched until the user actually confirms a candidate, so just redraw.
+  return SUCCEEDED(RequestEditSession(context, false, false));
+}
+
 bool TextService::HandleCandidateSelection(ITfContext* context,
                                            size_t one_based_index) {
   RefreshVisibleCandidates();
@@ -950,6 +995,7 @@ bool TextService::RestorePreviousFixedSegment() {
 
 void TextService::RefreshVisibleCandidates() {
   visible_candidates_.clear();
+  highlighted_candidate_index_ = 0;
   if (decoder_ == nullptr) {
     return;
   }
@@ -1183,7 +1229,7 @@ void TextService::UpdateCandidateWindow(TfEditCookie edit_cookie,
   if (!candidate_window_.EnsureCreated(g_hInstance)) {
     return;
   }
-  candidate_window_.Show(rect, lines);
+  candidate_window_.Show(rect, lines, highlighted_candidate_index_);
 }
 
 void TextService::HideCandidateWindow() { candidate_window_.Hide(); }
