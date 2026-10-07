@@ -120,6 +120,7 @@ class TextService final : public ITfTextInputProcessorEx,
   bool HandleArrowKey(ITfContext* context, bool move_right);
   bool HandleCandidateHighlightKey(ITfContext* context, bool move_down);
   bool HandleCandidateSelection(ITfContext* context, size_t one_based_index);
+  bool HandleToggleEnglishMode(ITfContext* context);
   bool CommitCurrentSyllable();
   bool RestorePreviousFixedSegment();
   void RefreshVisibleCandidates();
@@ -165,6 +166,13 @@ class TextService final : public ITfTextInputProcessorEx,
   // list itself changes (new typing, new segment targeted, etc.) so the
   // highlight always starts on the top (best-scoring) choice.
   size_t highlighted_candidate_index_;
+
+  // True once the user has toggled to literal English/ASCII typing with the
+  // dedicated toggle key (see ShouldHandleKey/HandleKeyDown): while set,
+  // every key is left unhandled so the host application's own keyboard
+  // layout takes over, same as fully switching off the Zhuyin IME without
+  // actually leaving it.
+  bool english_mode_;
 };
 
 }  // namespace zhuyin::windowsime

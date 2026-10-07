@@ -33,8 +33,12 @@ The `zhuyin_ime` target builds a normal TSF DLL (`zhuyin_ime.dll`). TSF text ser
 
 Two complementary ways to fix a wrong character/word, similar to Microsoft's New Phonetic IME:
 
-1. **Before committing (still composing):** press **Left/Right arrow** to move a selection cursor across the already-decoded (but not yet committed) text, one character/phrase segment at a time. The candidate popup repositions over the targeted segment; press a number key to replace just that segment with a different homophone/candidate. Typing or Backspace while navigating exits navigation mode and resumes normal append-at-end typing (there is no mid-string character editing in this pass — see limitations below).
+1. **Before committing (still composing):** press **Left/Right arrow** to move a selection cursor across the already-decoded (but not yet committed) text, one character/phrase segment at a time. The candidate popup repositions over the targeted segment; press **Up/Down arrow** to move the highlighted candidate, then **Enter** (or a number key) to replace just that segment with the chosen homophone/candidate. Typing or Backspace while navigating exits navigation mode and resumes normal append-at-end typing (there is no mid-string character editing in this pass — see limitations below).
 2. **After committing:** select (or place the caret next to) a character/phrase you already typed in any text field, then use the host application's built-in **"Reconversion"** / **重新轉換** command (commonly on the right-click context menu, or `Ctrl+F7`/`Shift+F6` in some apps). This calls back into the IME via the standard TSF `ITfFnReconversion` interface, which looks up the original Bopomofo reading for the selected text and reopens the normal candidate list directly on it, so you can pick the intended homophone.
+
+## Switching to English / literal ASCII typing
+
+Press the **` (backtick/grave) key** to toggle between Zhuyin composition and literal English/ASCII passthrough (where every key just types normally, as if the IME were off). The current composition, if any, is committed first. Microsoft's New Phonetic uses **Shift** for this; backtick was chosen instead here so an accidental Shift press (e.g. reaching for a capital letter or a shifted symbol) can't unexpectedly switch modes. The toggle key itself is swallowed, so a literal backtick character can't currently be typed while this IME is active.
 
 ## Install
 

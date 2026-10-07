@@ -292,7 +292,8 @@ TextService::TextService()
       engine_loaded_(false),
       engine_attempted_(false),
       nav_segment_index_(-1),
-      highlighted_candidate_index_(0) {
+      highlighted_candidate_index_(0),
+      english_mode_(false) {
   DllAddRef();
 }
 
@@ -636,6 +637,19 @@ bool TextService::ShouldHandleKey(WPARAM wParam) const {
     return false;
   }
 
+  // Dedicated Chinese/English toggle key. Microsoft New Phonetic uses Shift
+  // for this, but a bare Shift press is easy to trigger by accident (e.g.
+  // while reaching for a capital letter or symbol), so this IME uses the
+  // backtick/grave key instead -- it isn't mapped to any Bopomofo symbol, so
+  // there's no ambiguity with normal typing.
+  if (wParam == VK_OEM_3) {
+    return true;
+  }
+
+  if (english_mode_) {
+    return false;
+  }
+
   if (HasCompositionState()) {
     switch (wParam) {
       case VK_BACK:
@@ -696,6 +710,14 @@ bool TextService::HasUnsupportedModifierState() const {
 
 bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
   if (context == nullptr || HasUnsupportedModifierState()) {
+    return false;
+  }
+
+  if (wParam == VK_OEM_3) {
+    return HandleToggleEnglishMode(context);
+  }
+
+  if (english_mode_) {
     return false;
   }
 
@@ -845,6 +867,25 @@ bool TextService::HandleEscape(ITfContext* context) {
   const HRESULT hr = RequestEditSession(context, false, true);
   ResetState();
   return SUCCEEDED(hr);
+}
+
+bool TextService::HandleToggleEnglishMode(ITfContext* context) {
+  // Commit (or discard, if nothing decodable yet) any in-progress Zhuyin
+  // composition before switching modes, the same way switching away from
+  // the IME entirely would behave.
+  if (HasCompositionState()) {
+    if (syllable_composer_.HasFinal() || !pending_syllables_.empty() ||
+        !fixed_segments_.empty()) {
+      HandleCommit(context);
+    }
+    if (HasCompositionState()) {
+      RequestEditSession(context, false, true);
+      ResetState();
+    }
+  }
+
+  english_mode_ = !english_mode_;
+  return true;
 }
 
 bool TextService::HandleArrowKey(ITfContext* context, bool move_right) {
