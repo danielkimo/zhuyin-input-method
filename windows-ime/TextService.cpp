@@ -670,12 +670,18 @@ bool TextService::ShouldHandleKey(WPARAM wParam) const {
     }
 
     // Digits double as both candidate-selection shortcuts and Bopomofo
-    // symbol/tone keys on the Dachen layout. Only treat them as candidate
-    // selection once the current syllable is fully composed (no in-progress
-    // initial/medial/final waiting for its tone); otherwise let them fall
-    // through to the normal mapped-key handling below so e.g. a tone key
-    // typed mid-syllable isn't swallowed with no effect.
-    if (syllable_composer_.Empty() &&
+    // symbol/tone keys on the Dachen layout, which makes a bare digit
+    // ambiguous right at a syllable boundary: composer.Empty() is true both
+    // when the user wants to pick a candidate AND when they're simply
+    // starting the next syllable, and several digits (1,2,5,8,9) are
+    // themselves initial/final symbols (e.g. '5' is ㄓ). Only treat digits as
+    // candidate selection while the user has explicitly entered segment
+    // navigation (Left/Right) -- there, typing can't mean "start a new
+    // syllable" since navigation mode consumes that intent instead. Outside
+    // of navigation, digits always fall through as ordinary Bopomofo keys;
+    // the leading segment can still be corrected via Up/Down highlight +
+    // Enter/Space, which doesn't collide with typing.
+    if (syllable_composer_.Empty() && nav_segment_index_ >= 0 &&
         ((wParam >= '1' && wParam <= '9') ||
          (wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9))) {
       return true;
@@ -772,10 +778,15 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
     if (wParam == VK_DOWN) {
       return HandleCandidateHighlightKey(context, true);
     }
-    if (syllable_composer_.Empty() && wParam >= '1' && wParam <= '9') {
+    // See the matching comment in ShouldHandleKey: bare digits are only
+    // candidate-selection shortcuts while explicitly navigating segments
+    // (Left/Right); otherwise they're ordinary Bopomofo keys on this layout.
+    if (syllable_composer_.Empty() && nav_segment_index_ >= 0 && wParam >= '1' &&
+        wParam <= '9') {
       return HandleCandidateSelection(context, static_cast<size_t>(wParam - '0'));
     }
-    if (syllable_composer_.Empty() && wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9) {
+    if (syllable_composer_.Empty() && nav_segment_index_ >= 0 &&
+        wParam >= VK_NUMPAD1 && wParam <= VK_NUMPAD9) {
       return HandleCandidateSelection(context,
                                       static_cast<size_t>(wParam - VK_NUMPAD0));
     }
