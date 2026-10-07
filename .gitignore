@@ -1,0 +1,9 @@
+build/
+build_manual/
+dist/
+*.zip
+*.obj
+*.ilk
+*.pdb
+*.exe
+.DS_Store
