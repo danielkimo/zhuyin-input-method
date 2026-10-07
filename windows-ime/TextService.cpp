@@ -702,7 +702,21 @@ bool TextService::HandleKeyDown(ITfContext* context, WPARAM wParam) {
     if (wParam == VK_ESCAPE) {
       return HandleEscape(context);
     }
-    if (wParam == VK_RETURN || wParam == VK_SPACE) {
+    if (wParam == VK_RETURN) {
+      return HandleCommit(context);
+    }
+    if (wParam == VK_SPACE) {
+      // Space is overloaded: while a syllable is still being composed (no
+      // tone picked yet), it is the explicit first-tone symbol and should
+      // just finish that syllable so typing can continue into a longer
+      // phrase (e.g. ㄕㄨ + space -> 輸, then continue with ㄖㄨˋ ㄈㄚˇ to
+      // get 輸入法 instead of committing "書" to the document early).
+      // Only once there is no partial syllable left does space fall back to
+      // committing the whole composed phrase, matching Enter.
+      if (!syllable_composer_.Empty()) {
+        const char ascii_key = VirtualKeyToAscii(wParam);
+        return ascii_key != '\0' && HandleMappedSymbolKey(context, ascii_key);
+      }
       return HandleCommit(context);
     }
     if (wParam == VK_LEFT) {
